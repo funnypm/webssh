@@ -1,21 +1,23 @@
 import logging
 import socket
 import time
+import telnetlib
 
 
 class TelnetSocket:
     """Telnet socket wrapper that mimics SSH channel interface"""
     
-    def __init__(self, sock):
-        self.sock = sock
+    def __init__(self, telnet_obj):
+        self.telnet = telnet_obj
         self.closed = False
     
     def recv(self, bufsize):
-        """Receive data from socket"""
+        """Receive data from telnet"""
         try:
-            data = self.sock.recv(bufsize)
+            data = self.telnet.read_very_eager()
             return data
-        except socket.timeout:
+        except EOFError:
+            self.closed = True
             return b''
         except Exception as e:
             logging.error('Telnet recv error: {}'.format(e))
@@ -23,11 +25,12 @@ class TelnetSocket:
             return b''
     
     def send(self, data):
-        """Send data to socket"""
+        """Send data to telnet"""
         try:
             if isinstance(data, str):
                 data = data.encode('utf-8')
-            return self.sock.send(data)
+            self.telnet.write(data)
+            return len(data)
         except Exception as e:
             logging.error('Telnet send error: {}'.format(e))
             self.closed = True
@@ -35,17 +38,25 @@ class TelnetSocket:
     
     def fileno(self):
         """Get socket file descriptor"""
-        return self.sock.fileno()
+        try:
+            return self.telnet.get_socket().fileno()
+        except Exception as e:
+            logging.error('Telnet fileno error: {}'.format(e))
+            return -1
     
     def setblocking(self, flag):
         """Set blocking mode"""
-        self.sock.setblocking(flag)
+        try:
+            sock = self.telnet.get_socket()
+            sock.setblocking(flag)
+        except Exception as e:
+            logging.error('Telnet setblocking error: {}'.format(e))
     
     def close(self):
-        """Close socket"""
+        """Close telnet connection"""
         if not self.closed:
             try:
-                self.sock.close()
+                self.telnet.close()
             except Exception as e:
                 logging.error('Telnet close error: {}'.format(e))
             self.closed = True
@@ -59,7 +70,7 @@ class TelnetClient:
     """Telnet client implementation with SSH-like interface"""
     
     def __init__(self):
-        self.sock = None
+        self.telnet = None
         self.connected = False
         self.timeout = 10
         self.username = None
@@ -84,9 +95,7 @@ class TelnetClient:
         logging.info('Connecting to telnet {}:{}'.format(hostname, port))
         
         try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(timeout)
-            self.sock.connect((hostname, port))
+            self.telnet = telnetlib.Telnet(hostname, port, timeout=timeout)
             self.connected = True
             
             # Wait for server greeting
@@ -94,22 +103,20 @@ class TelnetClient:
             
             # Try to read initial banner/prompt
             try:
-                self.sock.settimeout(1)
-                banner = self.sock.recv(4096)
-                logging.debug('Telnet banner: {}'.format(banner))
-            except socket.timeout:
-                pass
-            finally:
-                self.sock.settimeout(timeout)
+                banner = self.telnet.read_very_eager()
+                if banner:
+                    logging.debug('Telnet banner: {}'.format(banner[:100]))
+            except Exception as e:
+                logging.debug('Error reading banner: {}'.format(e))
             
             # Send username if provided
             if username:
-                self.sock.send(username.encode() + b'\r\n')
+                self.telnet.write(username.encode('utf-8') + b'\r\n')
                 time.sleep(0.3)
             
             # Send password if provided
             if password:
-                self.sock.send(password.encode() + b'\r\n')
+                self.telnet.write(password.encode('utf-8') + b'\r\n')
                 time.sleep(0.3)
             
             logging.info('Telnet connected to {}:{}'.format(hostname, port))
@@ -134,15 +141,15 @@ class TelnetClient:
         if not self.connected:
             raise RuntimeError('Not connected')
         
-        return TelnetSocket(self.sock)
+        return TelnetSocket(self.telnet)
     
     def close(self):
         """Close Telnet connection"""
-        if self.sock:
+        if self.telnet:
             try:
-                self.sock.close()
+                self.telnet.close()
             except Exception as e:
-                logging.error('Error closing telnet socket: {}'.format(e))
+                logging.error('Error closing telnet connection: {}'.format(e))
             self.connected = False
     
     def exec_command(self, command, *args, **kwargs):
